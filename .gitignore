@@ -4,3 +4,7 @@
 *~
 .DS_Store
 pintos/**/build
+**/.idea/
+**/.vscode/
+CMakeLists.txt
+cmake-build-debug/
