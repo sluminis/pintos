@@ -61,11 +61,15 @@ static void start_process(void* file_name_) {
   success = load(file_name, &if_.eip, &if_.esp);
   if_.esp -= 0x10;  // aligned stack
   if_.esp -= 0x4;  // reserve for eip
+  *(int*)if_.esp = 0x3f3f3f3f;
 
   /* If load failed, quit. */
   palloc_free_page(file_name);
   if (!success)
     thread_exit();
+  
+  /* Check whether arguments for user program set properly*/
+  hex_dump((uintptr_t)if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
