@@ -46,6 +46,45 @@ tid_t process_execute(const char* file_name) {
   return tid;
 }
 
+void setup_arguments(const char* cmd_line, void** p_esp) {
+  void* esp = *p_esp;
+  char** tokens;
+  size_t token_cnt = 0;
+  size_t cmd_space = strlen(cmd_line) + 1;
+  char* user_stack_cmd = (char*) esp - cmd_space;
+  size_t max_token = PGSIZE / sizeof(char*);
+
+  /* Copy command to user stack. */
+  strlcpy(user_stack_cmd, cmd_line, cmd_space);
+
+  /* Split command for token pointers. */
+  tokens = palloc_get_page(0);
+  char* token;
+  char* save_ptr;
+  for (token = strtok_r(user_stack_cmd, " ", &save_ptr); token != NULL;
+        token = strtok_r(NULL, " ", &save_ptr)) {
+    ASSERT(token_cnt < max_token);
+    tokens[token_cnt] = token;
+    token_cnt += 1;
+  }
+  tokens[token_cnt] = NULL;
+
+  /* Put token pointers into user stack and align stack. */
+  int required_space = (token_cnt + 1) * sizeof(char*) + sizeof(char**) +
+                       sizeof(int) + cmd_space * sizeof(char);
+  int aligned_space = ROUND_UP(required_space, 16);
+  int base_addr = (int) PHYS_BASE - aligned_space;
+  *p_esp = (void*) base_addr;
+  int* p_argc = (int*) base_addr;
+  *p_argc = token_cnt;
+  char** p_argv = (char**) (p_argc + 1);
+  *p_argv = (char*) (p_argv + 1);
+  memcpy(p_argv + 1, tokens, (token_cnt + 1) * sizeof(char*));
+
+  /* Free resources. */
+  palloc_free_page(tokens);
+}
+
 /* A thread function that loads a user process and starts it
    running. */
 static void start_process(void* file_name_) {
@@ -53,15 +92,25 @@ static void start_process(void* file_name_) {
   struct intr_frame if_;
   bool success;
 
+  /* Concat file name */
+  char* fn_end = strchr(file_name, ' ');
+  if (fn_end != NULL)
+    *fn_end = '\0';
+
   /* Initialize interrupt frame and load executable. */
   memset(&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load(file_name, &if_.eip, &if_.esp);
-  if_.esp -= 0x10;  // aligned stack
-  if_.esp -= 0x4;  // reserve for eip
-  *(int*)if_.esp = 0x3f3f3f3f;
+
+  if (fn_end != NULL)
+    *fn_end = ' ';
+
+  if (success) {
+    setup_arguments(file_name, &if_.esp);
+    if_.esp -= 0x4;  // reserve for eip
+  }
 
   /* If load failed, quit. */
   palloc_free_page(file_name);
@@ -69,7 +118,7 @@ static void start_process(void* file_name_) {
     thread_exit();
   
   /* Check whether arguments for user program set properly*/
-  hex_dump((uintptr_t)if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
+  // hex_dump((uintptr_t)if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
