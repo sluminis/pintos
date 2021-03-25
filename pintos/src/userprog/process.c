@@ -39,14 +39,21 @@ tid_t process_execute(const char* file_name) {
     return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
 
+  char* fn_end = strchr(file_name, ' ');
+  if (fn_end != NULL)
+    *fn_end = '\0';
+
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
+
+  if (fn_end != NULL)
+    *fn_end = ' ';
   return tid;
 }
 
-void setup_arguments(const char* cmd_line, void** p_esp) {
+static void setup_arguments(const char* cmd_line, void** p_esp) {
   void* esp = *p_esp;
   char** tokens;
   size_t token_cnt = 0;
