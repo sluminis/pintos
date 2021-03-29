@@ -4,6 +4,7 @@
 #include <random.h>
 #include <stdio.h>
 #include <string.h>
+#include "threads/malloc.h"
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -57,6 +58,40 @@ static unsigned thread_ticks; /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+
+/* Impelements wait_status, wait_status only live in heap. */
+struct wait_status* wait_status_create(struct thread* t) {
+  struct wait_status* ws = 
+    (struct wait_status*) malloc(sizeof(struct wait_status));
+  
+  ws->tid = t->tid;
+  ws->thread = t;
+  ws->return_value = EXIT_SUCCESS;
+  sema_init(&ws->wait_semaphore, 0);
+  ws->reference_counter = 0;
+  lock_init(&ws->detach_lock);
+  
+  return ws;
+}
+
+unsigned wait_status_detach(struct wait_status* ws) {
+  unsigned ref = 0;
+
+  // printf("%d detach wait_status of %d, ref=%d\n",
+  //   thread_current()->tid, ws->tid, ws->reference_counter);
+  
+  lock_acquire(&ws->detach_lock);
+  ws->reference_counter -= 1;
+  ref = ws->reference_counter;
+  lock_release(&ws->detach_lock);
+
+  if (ref == 0) {
+    // printf("%d is going to free wait_status of %d\n",
+    //   thread_current()->tid, ws->tid);
+    free(ws);
+  }
+  return ref;
+}
 
 static void kernel_thread(thread_func*, void* aux);
 
@@ -170,6 +205,10 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
+  
+  t->my_status = wait_status_create(t);
+  list_push_front(&thread_current()->children_status, &t->my_status->elem);
+  t->my_status->reference_counter = 2;
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
@@ -251,12 +290,26 @@ tid_t thread_tid(void) { return thread_current()->tid; }
 
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
-void thread_exit(void) {
+void thread_exit(int status) {
   ASSERT(!intr_context());
 
 #ifdef USERPROG
   process_exit();
 #endif
+
+  struct thread* t = thread_current();
+
+  struct wait_status* ws = t->my_status;
+  ws->return_value = status;
+  sema_up(&ws->wait_semaphore);
+  wait_status_detach(ws);
+  t->my_status = NULL;
+
+  struct list_elem* cur = list_head(&t->children_status);
+  while ((cur = list_next (cur)) != list_end (&t->children_status)) {
+    struct wait_status* cws = list_entry(cur, struct wait_status, elem);
+    wait_status_detach(cws);
+  }
 
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
@@ -366,7 +419,7 @@ static void kernel_thread(thread_func* function, void* aux) {
 
   intr_enable(); /* The scheduler runs with interrupts off. */
   function(aux); /* Execute the thread function. */
-  thread_exit(); /* If function() returns, kill the thread. */
+  thread_exit(EXIT_SUCCESS); /* If function() returns, kill the thread. */
 }
 
 /* Returns the running thread. */
@@ -399,6 +452,9 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
   t->magic = THREAD_MAGIC;
+
+  t->my_status = NULL;
+  list_init(&t->children_status);
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);

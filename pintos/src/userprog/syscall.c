@@ -1,4 +1,5 @@
 #include "userprog/syscall.h"
+#include "userprog/process.h"
 #include <stdio.h>
 #include <string.h>
 #include <syscall-nr.h>
@@ -20,7 +21,7 @@ static bool check_args(uint32_t* p, unsigned n);
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
-  if (!check_uint32(args)) k_exit(-1);
+  if (!check_uint32(args)) k_exit(EXIT_FAILURE);
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -41,33 +42,33 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     break;
   
   case SYS_EXIT:
-    if (!check_args(args, 2)) k_exit(-1);
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
     f->eax = args[1];
     k_exit(args[1]);
     break;
 
   case SYS_EXEC:
-    if (!check_args(args, 2)) k_exit(-1);
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
     file = (const char*) args[1];
-    if (!check_string(file)) k_exit(-1);
-    f->eax = k_exec(file);
+    if (!check_string(file)) k_exit(EXIT_FAILURE);
+    f->eax = process_execute(file);
     break;
 
   case SYS_WAIT:
-    if (!check_args(args, 2)) k_exit(-1);
-    f->eax = k_wait(args[1]);
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    f->eax = process_wait(args[1]);
     break;
 
   case SYS_WRITE:
-    if (!check_args(args, 4)) k_exit(-1);
+    if (!check_args(args, 4)) k_exit(EXIT_FAILURE);
     const_buffer = (const void*) args[2];
     size = args[3];
-    if (!check_readonly_buffer(const_buffer, size)) k_exit(-1);
+    if (!check_readonly_buffer(const_buffer, size)) k_exit(EXIT_FAILURE);
     f->eax = k_write(args[1], const_buffer, size);
     break;
 
   case SYS_PRACTICE:
-    if (!check_args(args, 2)) k_exit(-1);
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
     f->eax = args[1] + 1;
     break;
   
@@ -79,38 +80,26 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
 void k_exit (int status) {
   printf("%s: exit(%d)\n", thread_current()->name, status);
-  thread_exit();
+  thread_exit(status);
 }
 
-void k_halt (void) {
-
-}
-
-tid_t k_exec (const char* file) {
-  return 0;
-}
-
-int k_wait (tid_t pid) {
-  return 0;
-}
-
-bool k_create (const char* file, unsigned initial_size) {
+bool k_create (const char* file UNUSED, unsigned initial_size UNUSED) {
   return false;
 }
 
-bool k_remove (const char* file) {
+bool k_remove (const char* file UNUSED) {
   return false;
 }
 
-int k_open (const char* file) {
+int k_open (const char* file UNUSED) {
   return 0;
 }
 
-int k_filesize (int fd) {
+int k_filesize (int fd UNUSED) {
   return 0;
 }
 
-int k_read (int fd, void* buffer, unsigned length) {
+int k_read (int fd UNUSED, void* buffer UNUSED, unsigned length UNUSED) {
   return 0;
 }
 
@@ -124,15 +113,15 @@ int k_write (int fd, const void* buffer, unsigned length) {
   return 0;
 }
 
-void k_seek (int fd, unsigned position) {
+void k_seek (int fd UNUSED, unsigned position UNUSED) {
 
 }
 
-unsigned k_tell (int fd) {
+unsigned k_tell (int fd UNUSED) {
   return 0;
 }
 
-void k_close (int fd) {
+void k_close (int fd UNUSED) {
 
 }
 

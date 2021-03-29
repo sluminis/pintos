@@ -15,6 +15,8 @@ enum thread_status {
   THREAD_DYING    /* About to be destroyed. */
 };
 
+struct wait_status;
+
 /* Thread identifier type.
    You can redefine this to whatever type you like. */
 typedef int tid_t;
@@ -24,6 +26,9 @@ typedef int tid_t;
 #define PRI_MIN 0      /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
+
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE -1
 
 /* A kernel thread or user process.
 
@@ -98,9 +103,31 @@ struct thread {
   uint32_t* pagedir; /* Page directory. */
 #endif
 
+  /* Support exec() */
+  struct wait_status* my_status; // my status shared with parent
+
+  /* A wait_status list support wait() and exit() */
+  struct list children_status;
+  
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };
+
+/* Wait status struct help handle cross process wait action,
+   including exec, wait, exit and related rountines. */
+struct wait_status {
+  tid_t tid;
+  struct thread* thread;
+  int return_value;
+  unsigned reference_counter; // initially held by two processes
+  struct semaphore wait_semaphore;
+  struct lock detach_lock; // hold this lock before changing ref counter
+  struct list_elem elem;
+};
+
+/* wait_status only live in heap. */
+struct wait_status* wait_status_create(struct thread* t);
+unsigned wait_status_detach(struct wait_status* ws);
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -123,7 +150,7 @@ struct thread* thread_current(void);
 tid_t thread_tid(void);
 const char* thread_name(void);
 
-void thread_exit(void) NO_RETURN;
+void thread_exit(int status) NO_RETURN;
 void thread_yield(void);
 
 /* Performs some operation on thread t, given auxiliary data AUX. */

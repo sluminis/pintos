@@ -18,8 +18,8 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
-static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static bool load(const char* cmdline, void (**eip)(void), void** esp);
 
@@ -29,9 +29,8 @@ static bool load(const char* cmdline, void (**eip)(void), void** esp);
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t process_execute(const char* file_name) {
   char* fn_copy;
-  tid_t tid;
+  tid_t ctid;
 
-  sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
@@ -40,17 +39,90 @@ tid_t process_execute(const char* file_name) {
   strlcpy(fn_copy, file_name, PGSIZE);
 
   char* fn_end = strchr(file_name, ' ');
-  if (fn_end != NULL)
-    *fn_end = '\0';
+  size_t executable_length = strlen(file_name);
+  if (fn_end != NULL) {
+    executable_length = fn_end - file_name;
+  }
+  char* executable_name = (char*) calloc(sizeof(char), executable_length + 1);
+  strlcpy(executable_name, file_name, executable_length + 1);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
+  ctid = thread_create(executable_name, PRI_DEFAULT, start_process, fn_copy);
+  free(executable_name);
+  
+  if (ctid == TID_ERROR) {
     palloc_free_page(fn_copy);
+    return ctid;
+  }
 
-  if (fn_end != NULL)
-    *fn_end = ' ';
-  return tid;
+  struct thread* t = thread_current();
+  struct list_elem* cur = list_head(&t->children_status);
+  struct wait_status* ws = NULL;
+  while ((cur = list_next (cur)) != list_end (&t->children_status)) {
+    ws = list_entry(cur, struct wait_status, elem);
+    if (ws->tid == ctid) break;
+    ws = NULL;
+  }
+  ASSERT(ws != NULL);
+
+  sema_down(&ws->wait_semaphore);
+  if (ws->return_value == EXIT_FAILURE) {
+    // printf("%d create child %d failed!\n", thread_current()->tid, ws->tid);
+    list_remove(cur);
+    wait_status_detach(ws);
+    ctid = TID_ERROR;
+  }
+  // else printf("%d create child %d succeed!\n", thread_current()->tid, ws->tid);
+
+  return ctid;
+}
+
+static void setup_arguments(const char* cmd_line, void** p_esp);
+
+/* A thread function that loads a user process and starts it
+   running. */
+static void start_process(void* file_name_) {
+  char* file_name = file_name_;
+  struct intr_frame if_;
+  bool success;
+
+  /* Concat file name */
+  char* fn_end = strchr(file_name, ' ');
+  if (fn_end != NULL) *fn_end = '\0';
+
+  /* Initialize interrupt frame and load executable. */
+  memset(&if_, 0, sizeof if_);
+  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
+  if_.cs = SEL_UCSEG;
+  if_.eflags = FLAG_IF | FLAG_MBS;
+  success = load(file_name, &if_.eip, &if_.esp);
+
+  /* If load failed, quit. */
+  if (!success) {
+    palloc_free_page(file_name);
+    // printf("%d load fail\n", thread_current()->tid);
+    thread_exit(EXIT_FAILURE);
+  } else {
+    sema_up(&thread_current()->my_status->wait_semaphore);
+  }
+
+  if (fn_end != NULL) *fn_end = ' ';
+
+  setup_arguments(file_name, &if_.esp);
+  if_.esp -= 0x4;  // reserve for eip
+  palloc_free_page(file_name);
+  
+  /* Check whether arguments for user program set properly*/
+  // hex_dump((uintptr_t)if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
+
+  /* Start the user process by simulating a return from an
+     interrupt, implemented by intr_exit (in
+     threads/intr-stubs.S).  Because intr_exit takes all of its
+     arguments on the stack in the form of a `struct intr_frame',
+     we just point the stack pointer (%esp) to our stack frame
+     and jump to it. */
+  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+  NOT_REACHED();
 }
 
 static void setup_arguments(const char* cmd_line, void** p_esp) {
@@ -92,51 +164,6 @@ static void setup_arguments(const char* cmd_line, void** p_esp) {
   palloc_free_page(tokens);
 }
 
-/* A thread function that loads a user process and starts it
-   running. */
-static void start_process(void* file_name_) {
-  char* file_name = file_name_;
-  struct intr_frame if_;
-  bool success;
-
-  /* Concat file name */
-  char* fn_end = strchr(file_name, ' ');
-  if (fn_end != NULL)
-    *fn_end = '\0';
-
-  /* Initialize interrupt frame and load executable. */
-  memset(&if_, 0, sizeof if_);
-  if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
-  if_.cs = SEL_UCSEG;
-  if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load(file_name, &if_.eip, &if_.esp);
-
-  if (fn_end != NULL)
-    *fn_end = ' ';
-
-  if (success) {
-    setup_arguments(file_name, &if_.esp);
-    if_.esp -= 0x4;  // reserve for eip
-  }
-
-  /* If load failed, quit. */
-  palloc_free_page(file_name);
-  if (!success)
-    thread_exit();
-  
-  /* Check whether arguments for user program set properly*/
-  // hex_dump((uintptr_t)if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
-
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
-  NOT_REACHED();
-}
-
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If TID is invalid or if it was not a
@@ -146,9 +173,25 @@ static void start_process(void* file_name_) {
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int process_wait(tid_t child_tid UNUSED) {
-  sema_down(&temporary);
-  return 0;
+int process_wait(tid_t child_tid) {
+  struct thread* t = thread_current();
+  struct list_elem* cur = list_head(&t->children_status);
+  struct wait_status* ws = NULL;
+  while ((cur = list_next (cur)) != list_end (&t->children_status)) {
+    ws = list_entry(cur, struct wait_status, elem);
+    if (ws->tid == child_tid) break;
+    ws = NULL;
+  }
+
+  if (ws == NULL) {
+    return EXIT_FAILURE;
+  }
+  sema_down(&ws->wait_semaphore);
+  int result = ws->return_value;
+  list_remove(cur);
+  wait_status_detach(ws);
+
+  return result;
 }
 
 /* Free the current process's resources. */
@@ -171,7 +214,6 @@ void process_exit(void) {
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
-  sema_up(&temporary);
 }
 
 /* Sets up the CPU for running user code in the current
