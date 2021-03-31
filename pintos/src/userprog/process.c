@@ -55,6 +55,7 @@ tid_t process_execute(const char* file_name) {
     return ctid;
   }
 
+  /* Retrieve newly created child process. */
   struct thread* t = thread_current();
   struct list_elem* cur = list_head(&t->children_status);
   struct wait_status* ws = NULL;
@@ -65,6 +66,7 @@ tid_t process_execute(const char* file_name) {
   }
   ASSERT(ws != NULL);
 
+  /* Wait for child process finish loading. */
   sema_down(&ws->wait_semaphore);
   if (ws->return_value == EXIT_FAILURE) {
     // printf("%d create child %d failed!\n", thread_current()->tid, ws->tid);
@@ -214,6 +216,20 @@ void process_exit(void) {
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
+
+  /* Free files reources, allow write to my executable file. */
+  file_operation_begin();
+  if (cur->my_executable != NULL) {
+    file_allow_write(cur->my_executable);
+    file_close(cur->my_executable);
+  }
+  for (int i = 3; i < MAX_NUMBER_OF_FILES; ++i) {
+    if (cur->files[i] != NULL) {
+      file_close(cur->files[i]);
+      cur->files[i] = NULL;
+    }
+  }
+  file_operation_end();
 }
 
 /* Sets up the CPU for running user code in the current
@@ -314,12 +330,14 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     goto done;
   process_activate();
 
+  file_operation_begin();
   /* Open executable file. */
   file = filesys_open(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
+  file_deny_write(file);
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
@@ -390,7 +408,14 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
 
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
+  if (success) {
+    t->my_executable = file;
+  } else if (file != NULL) {
+    file_allow_write(file);
+    file_close(file);
+  }
+  file_operation_end();
+
   return success;
 }
 

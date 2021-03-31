@@ -93,6 +93,24 @@ unsigned wait_status_detach(struct wait_status* ws) {
   return ref;
 }
 
+/* Support file operation system calls. */
+static struct lock file_operation_lock;
+
+int thread_allocate_fd() {
+  struct thread* t = thread_current();
+  for (int i = 3; i < MAX_NUMBER_OF_FILES; ++i) {
+    if (t->files[i] == NULL) return i;
+  }
+  return -1;
+}
+
+void file_operation_begin() {
+  lock_acquire(&file_operation_lock);
+}
+void file_operation_end() {
+  lock_release(&file_operation_lock);
+}
+
 static void kernel_thread(thread_func*, void* aux);
 
 static void idle(void* aux UNUSED);
@@ -122,6 +140,7 @@ void thread_init(void) {
   ASSERT(intr_get_level() == INTR_OFF);
 
   lock_init(&tid_lock);
+  lock_init(&file_operation_lock);
   list_init(&ready_list);
   list_init(&all_list);
 

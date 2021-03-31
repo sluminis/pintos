@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
+#include "filesys/file.h"
 
 /* States in a thread's life cycle. */
 enum thread_status {
@@ -29,6 +30,9 @@ typedef int tid_t;
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE -1
+
+#define MAX_NUMBER_OF_FILES 128
+#define BAD_FD -1
 
 /* A kernel thread or user process.
 
@@ -105,10 +109,13 @@ struct thread {
 
   /* Support exec() */
   struct wait_status* my_status; // my status shared with parent
-
   /* A wait_status list support wait() and exit() */
   struct list children_status;
   
+  /* Support file operation system calls. */
+  struct file* my_executable;
+  struct file* files[MAX_NUMBER_OF_FILES];
+
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };
@@ -164,5 +171,10 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+/* Support file operation system calls. */
+int thread_allocate_fd(void);
+void file_operation_begin(void);
+void file_operation_end(void);
 
 #endif /* threads/thread.h */

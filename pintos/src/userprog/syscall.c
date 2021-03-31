@@ -7,6 +7,9 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "devices/shutdown.h"
+#include "devices/input.h"
+#include "filesys/file.h"
+#include "filesys/filesys.h"
 
 static void syscall_handler(struct intr_frame*);
 
@@ -19,7 +22,7 @@ static bool check_writable_buffer(void* buffer, unsigned length);
 static bool check_uint32(uint32_t* p);
 static bool check_args(uint32_t* p, unsigned n);
 
-static void syscall_handler(struct intr_frame* f UNUSED) {
+static void syscall_handler(struct intr_frame* f) {
   uint32_t* args = ((uint32_t*)f->esp);
   if (!check_uint32(args)) k_exit(EXIT_FAILURE);
 
@@ -59,12 +62,61 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     f->eax = process_wait(args[1]);
     break;
 
-  case SYS_WRITE:
+  case SYS_CREATE:   /* Create a file. */
+    if (!check_args(args, 3)) k_exit(EXIT_FAILURE);
+    file = (const char*) args[1];
+    if (!check_string(file)) k_exit(EXIT_FAILURE);
+    f->eax = k_create(file, args[2]);
+    break;
+
+  case SYS_REMOVE:   /* Delete a file. */
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    file = (const char*) args[1];
+    if (!check_string(file)) k_exit(EXIT_FAILURE);
+    f->eax = k_remove(file);
+    break;
+
+  case SYS_OPEN:     /* Open a file. */
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    file = (const char*) args[1];
+    if (!check_string(file)) k_exit(EXIT_FAILURE);
+    f->eax = k_open(file);
+    break;
+
+  case SYS_FILESIZE: /* Obtain a file's size. */
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    f->eax = k_filesize(args[1]);
+    break;
+
+  case SYS_READ:     /* Read from a file. */
+    if (!check_args(args, 4)) k_exit(EXIT_FAILURE);
+    buffer = (void*) args[2];
+    size = args[3];
+    if (!check_writable_buffer(buffer, size)) k_exit(EXIT_FAILURE);
+    f->eax = k_read(args[1], buffer, size);
+    break;
+
+  case SYS_WRITE:    /* Write to a file. */
     if (!check_args(args, 4)) k_exit(EXIT_FAILURE);
     const_buffer = (const void*) args[2];
     size = args[3];
     if (!check_readonly_buffer(const_buffer, size)) k_exit(EXIT_FAILURE);
     f->eax = k_write(args[1], const_buffer, size);
+    break;
+
+  case SYS_SEEK:     /* Change position in a file. */
+    if (!check_args(args, 3)) k_exit(EXIT_FAILURE);
+    k_seek(args[1], args[2]);
+    break;
+
+  case SYS_TELL:     /* Report current position in a file. */
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    f->eax = k_tell(args[1]);
+    break;
+
+  case SYS_CLOSE:    /* Close a file. */
+    if (!check_args(args, 2)) k_exit(EXIT_FAILURE);
+    k_close(args[1]);
     break;
 
   case SYS_PRACTICE:
@@ -83,46 +135,147 @@ void k_exit (int status) {
   thread_exit(status);
 }
 
-bool k_create (const char* file UNUSED, unsigned initial_size UNUSED) {
-  return false;
+bool k_create (const char* file, unsigned initial_size) {
+  bool res = false;
+
+  file_operation_begin();
+  res = filesys_create(file, initial_size);
+  file_operation_end();
+
+  return res;
 }
 
-bool k_remove (const char* file UNUSED) {
-  return false;
+bool k_remove (const char* file) {
+  bool res = false;
+
+  file_operation_begin();
+  res = filesys_remove(file);
+  file_operation_end();
+
+  return res;
 }
 
-int k_open (const char* file UNUSED) {
-  return 0;
+int k_open (const char* file) {
+  int fd = BAD_FD;
+
+  file_operation_begin();
+  struct file* fs = filesys_open(file);
+  if (fs != NULL) {
+    fd = thread_allocate_fd();
+    thread_current()->files[fd] = fs;
+  }
+  file_operation_end();
+
+  return fd;
 }
 
-int k_filesize (int fd UNUSED) {
-  return 0;
+int k_filesize (int fd) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  struct thread* t = thread_current();
+  int size = -1;
+
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  size = file_length(t->files[fd]);
+  file_operation_end();
+  
+  return size;
 }
 
-int k_read (int fd UNUSED, void* buffer UNUSED, unsigned length UNUSED) {
-  return 0;
+int k_read (int fd, void* buffer, unsigned length) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  if (fd <= 2) {
+    if (fd == 0) {
+      for (unsigned i = 0; i < length; ++i) {
+        ((uint8_t*) buffer)[i] = input_getc();
+      }
+      return length;
+    }
+    return -1;
+  }
+
+  struct thread* t = thread_current();
+  int size = -1;
+
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  size = file_read(t->files[fd], buffer, length);
+  file_operation_end();
+
+  return size;
 }
 
 int k_write (int fd, const void* buffer, unsigned length) {
-  if (fd == 1) {
-    putbuf((const char*) buffer, length);
-    return (int) length;
-  } else if (fd <= 2) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  if (fd <= 2) {
+    if (fd == 1) {
+      putbuf((const char*) buffer, length);
+      return (int) length;
+    }
     return -1;
   }
-  return 0;
+
+  struct thread* t = thread_current();
+  int size = -1;
+
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  size = file_write(t->files[fd], buffer, length);
+  file_operation_end();
+
+  return size;
 }
 
-void k_seek (int fd UNUSED, unsigned position UNUSED) {
-
+void k_seek (int fd, unsigned position) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  struct thread* t = thread_current();
+  
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  file_seek(t->files[fd], (off_t) position);
+  file_operation_end();
 }
 
-unsigned k_tell (int fd UNUSED) {
-  return 0;
+unsigned k_tell (int fd) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  struct thread* t = thread_current();
+  unsigned res = 0;
+
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  res = file_tell(t->files[fd]);
+  file_operation_end();
+
+  return res;
 }
 
-void k_close (int fd UNUSED) {
+void k_close (int fd) {
+  if (fd < 0 || fd > MAX_NUMBER_OF_FILES) k_exit(-1);
+  struct thread* t = thread_current();
 
+  file_operation_begin();
+  if (t->files[fd] == NULL) {
+    file_operation_end();
+    k_exit(-1);
+  }
+  file_close(t->files[fd]);
+  t->files[fd] = NULL;
+  file_operation_end();
 }
 
 /* Check variables implementation. */
@@ -157,10 +310,9 @@ static bool check_args(uint32_t* p, unsigned n) {
 }
 
 static bool check_range(void* start, unsigned length, bool writable) {
-  if (!check_addr(start, writable)) return false;
-  void* next_page = pg_round_up(start);
-  for (; (unsigned) (next_page - start) < length; next_page = pg_round_up(next_page + 1)) {
-    if (!check_addr(next_page, writable)) return false;
+  void* page = start;
+  for (; (unsigned) (page - start) < length; page = pg_round_up(page + 1)) {
+    if (!check_addr(page, writable)) return false;
   }
   return true;
 }
